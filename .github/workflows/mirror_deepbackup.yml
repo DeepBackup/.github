@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   mirror:
-    name: Mirror Repositories from Star List
+    name: Mirror Repositories from Star List DB
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6 hours max for large repositories
     
@@ -60,7 +60,8 @@ jobs:
           MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
           MIRROR_ORG: ${{ vars.MIRROR_ORG }}
           MIRROR_VISIBILITY: ${{ vars.MIRROR_VISIBILITY }}
-          STAR_LIST_NAME: "DB"
+          STAR_LIST_NAME: ${{ vars.STAR_LIST_NAME }}
+          PRIVATE_REPOS: ${{ vars.PRIVATE_REPOS }}
         run: |
           python mirror_deepbackup.py
       
