@@ -268,7 +268,7 @@ def ensure_destination_repo(
         payload = {
             "name": dest_name,
             "private": visibility.lower() == "private",
-            "description": f"Mirror of {source_owner}/{source_name}",
+            "description": f"Mirror of https://github.com/{source_owner}/{source_name}",
             "has_issues": False,
             "has_projects": False,
             "has_wiki": False
