@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Repository mirroring script for GitHub Star List "DB" and private_repos.json
-Idempotent, production-grade backup system
-"""
-
 import json
 import os
 import re
@@ -13,7 +7,6 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 import requests
-
 
 class MirrorError(Exception):
     """Base exception for mirroring operations"""
@@ -45,7 +38,7 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
     query_get_lists = """
     query {
       viewer {
-        starredLists(first: 100) {
+        lists(first: 100) {
           nodes {
             id
             name
@@ -69,7 +62,7 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
     if "errors" in data:
         raise GraphQLError(f"GraphQL errors: {data['errors']}")
     
-    lists = data.get("data", {}).get("viewer", {}).get("starredLists", {}).get("nodes", [])
+    lists = data.get("data", {}).get("viewer", {}).get("lists", {}).get("nodes", [])
     
     target_list = None
     for lst in lists:
@@ -168,14 +161,43 @@ def parse_github_url(url: str) -> Dict[str, str]:
     return {"owner": owner, "name": name, "url": url}
 
 
+def load_private_repos_from_vars() -> List[Dict[str, str]]:
+    """
+    Load private repositories from GitHub Variables
+    Reads PRIVATE_REPOS environment variable (newline or comma-separated URLs)
+    Returns list of dicts with 'owner', 'name', 'url'
+    """
+    repos_var = os.getenv("PRIVATE_REPOS", "").strip()
+    
+    if not repos_var:
+        print("No PRIVATE_REPOS variable set, skipping private repositories")
+        return []
+    
+    # Support both newline and comma-separated formats
+    if '\n' in repos_var:
+        urls = [url.strip() for url in repos_var.split('\n') if url.strip()]
+    else:
+        urls = [url.strip() for url in repos_var.split(',') if url.strip()]
+    
+    repos = []
+    for url in urls:
+        try:
+            repo = parse_github_url(url)
+            repos.append(repo)
+        except ValueError as e:
+            print(f"Warning: Skipping invalid URL in PRIVATE_REPOS: {e}")
+    
+    print(f"Loaded {len(repos)} private repositories from PRIVATE_REPOS variable")
+    return repos
+
+
 def load_private_repos(filepath: Path) -> List[Dict[str, str]]:
     """
-    Load private repositories from JSON file
+    Load private repositories from JSON file (deprecated - kept for backwards compatibility)
     Returns list of dicts with 'owner', 'name', 'url'
     """
     if not filepath.exists():
-        print(f"Warning: {filepath} does not exist, creating empty file")
-        filepath.write_text("[]")
+        print(f"Note: {filepath} does not exist, skipping file-based repos")
         return []
     
     try:
@@ -184,6 +206,10 @@ def load_private_repos(filepath: Path) -> List[Dict[str, str]]:
         
         if not isinstance(urls, list):
             raise ValueError("private_repos.json must contain a JSON array")
+        
+        if not urls:
+            print(f"Note: {filepath} is empty")
+            return []
         
         repos = []
         for url in urls:
@@ -345,6 +371,7 @@ def mirror_repository(
                 capture_output=True
             )
 
+
 def main():
     """Main execution flow"""
     # Required environment variables
@@ -369,9 +396,14 @@ def main():
         # Fetch repositories from Star List
         starlist_repos = get_starlist_repositories(token, list_name)
         
-        # Load private repositories
-        private_repos_file = Path("private_repos.json")
-        private_repos = load_private_repos(private_repos_file)
+        # Load private repositories from GitHub Variables (preferred method)
+        private_repos = load_private_repos_from_vars()
+        
+        # Fallback: Also check private_repos.json for backwards compatibility
+        if not private_repos:
+            private_repos_file = Path("private_repos.json")
+            if private_repos_file.exists():
+                private_repos = load_private_repos(private_repos_file)
         
         # Merge and deduplicate
         all_repos = merge_repositories(starlist_repos, private_repos)
@@ -436,5 +468,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-  
