@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Repository mirroring script for GitHub Star List "DB" and private_repos.json
+Idempotent, production-grade backup system
+"""
+
 import json
 import os
 import re
@@ -8,17 +14,21 @@ from typing import Dict, List, Set
 
 import requests
 
+
 class MirrorError(Exception):
     """Base exception for mirroring operations"""
     pass
+
 
 class GraphQLError(MirrorError):
     """GraphQL API errors"""
     pass
 
+
 class RepositoryError(MirrorError):
     """Repository operation errors"""
     pass
+
 
 def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]]:
     """
@@ -31,72 +41,34 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
         "Content-Type": "application/json"
     }
     
-    # First, get the list ID
-    query_get_lists = """
-    query {
-      viewer {
-        lists(first: 100) {
-          nodes {
-            id
-            name
-          }
-        }
-      }
-    }
-    """
-    
-    response = requests.post(
-        graphql_url,
-        json={"query": query_get_lists},
-        headers=headers,
-        timeout=30
-    )
-    
-    if response.status_code != 200:
-        raise GraphQLError(f"GraphQL request failed: {response.status_code} {response.text}")
-    
-    data = response.json()
-    if "errors" in data:
-        raise GraphQLError(f"GraphQL errors: {data['errors']}")
-    
-    lists = data.get("data", {}).get("viewer", {}).get("lists", {}).get("nodes", [])
-    
-    target_list = None
-    for lst in lists:
-        if lst.get("name") == list_name:
-            target_list = lst
-            break
-    
-    if not target_list:
-        raise GraphQLError(f"Star List '{list_name}' not found. Available lists: {[l['name'] for l in lists]}")
-    
-    list_id = target_list["id"]
-    print(f"Found Star List '{list_name}' with ID: {list_id}")
-    
-    # Now fetch repositories from this list
     repositories = []
     cursor = None
     
     while True:
         after_clause = f', after: "{cursor}"' if cursor else ""
-        query_get_repos = f"""
+        
+        # Query to get lists and their items in one go
+        query = f"""
         query {{
-          node(id: "{list_id}") {{
-            ... on List {{
-              items(first: 100{after_clause}) {{
-                pageInfo {{
-                  hasNextPage
-                  endCursor
-                }}
-                nodes {{
-                  ... on Repository {{
-                    nameWithOwner
-                    url
-                    isPrivate
-                    owner {{
-                      login
+          viewer {{
+            lists(first: 100) {{
+              nodes {{
+                name
+                items(first: 100{after_clause}) {{
+                  pageInfo {{
+                    hasNextPage
+                    endCursor
+                  }}
+                  nodes {{
+                    ... on Repository {{
+                      nameWithOwner
+                      url
+                      isPrivate
+                      owner {{
+                        login
+                      }}
+                      name
                     }}
-                    name
                   }}
                 }}
               }}
@@ -107,7 +79,7 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
         
         response = requests.post(
             graphql_url,
-            json={"query": query_get_repos},
+            json={"query": query},
             headers=headers,
             timeout=30
         )
@@ -119,7 +91,24 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
         if "errors" in data:
             raise GraphQLError(f"GraphQL errors: {data['errors']}")
         
-        items = data.get("data", {}).get("node", {}).get("items", {})
+        lists = data.get("data", {}).get("viewer", {}).get("lists", {}).get("nodes", [])
+        
+        # Find the target list
+        target_list = None
+        for lst in lists:
+            if lst.get("name") == list_name:
+                target_list = lst
+                break
+        
+        if not target_list:
+            available_lists = [l['name'] for l in lists]
+            raise GraphQLError(
+                f"Star List '{list_name}' not found. "
+                f"Available lists: {available_lists if available_lists else 'None'}"
+            )
+        
+        # Extract repositories from the target list
+        items = target_list.get("items", {})
         nodes = items.get("nodes", [])
         
         for node in nodes:
@@ -131,6 +120,7 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
                     "is_private": node["isPrivate"]
                 })
         
+        # Check pagination
         page_info = items.get("pageInfo", {})
         if not page_info.get("hasNextPage"):
             break
