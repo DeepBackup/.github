@@ -1,0 +1,75 @@
+name: Auto Mirror Repositories
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: Mirror Repositories from Star List
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max for large repositories
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Configure Git
+        run: |
+          git config --global user.name "DeepBackup Mirror Bot"
+          git config --global user.email "mirror-bot@deepbackup.github.io"
+          git config --global credential.helper store
+      
+      - name: Validate environment
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          MIRROR_ORG: ${{ vars.MIRROR_ORG }}
+          MIRROR_VISIBILITY: ${{ vars.MIRROR_VISIBILITY }}
+        run: |
+          if [ -z "$MIRROR_TOKEN" ]; then
+            echo "Error: MIRROR_TOKEN secret is not set"
+            exit 1
+          fi
+          if [ -z "$MIRROR_ORG" ]; then
+            echo "Error: MIRROR_ORG variable is not set"
+            exit 1
+          fi
+          echo "Environment validated successfully"
+          echo "Target organization: $MIRROR_ORG"
+          echo "Visibility: ${MIRROR_VISIBILITY:-private}"
+      
+      - name: Execute mirror operation
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          MIRROR_ORG: ${{ vars.MIRROR_ORG }}
+          MIRROR_VISIBILITY: ${{ vars.MIRROR_VISIBILITY }}
+          STAR_LIST_NAME: "DB"
+        run: |
+          python mirror_deepbackup.py
+      
+      - name: Upload execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-log-${{ github.run_id }}
+          path: |
+            *.log
+          retention-days: 30
+          if-no-files-found: ignore
