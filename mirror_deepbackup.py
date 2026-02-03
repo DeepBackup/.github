@@ -301,8 +301,8 @@ def mirror_repository(
     token: str
 ):
     """
-    Mirror a repository using git clone --mirror and git push --mirror
-    Idempotent operation
+    Mirror a repository using git clone --mirror and selective push
+    Idempotent operation - excludes pull request refs which GitHub doesn't allow
     """
     mirror_dir = Path(f"/tmp/mirror_{source_owner}__{source_name}")
     
@@ -331,15 +331,47 @@ def mirror_repository(
             text=True
         )
         
-        print(f"Pushing mirror to destination...")
+        print(f"Pushing mirror to destination (excluding pull request refs)...")
         
-        # Push mirror to destination
+        # Push all refs except pull request refs
+        # GitHub doesn't allow pushing refs/pull/* as they are read-only
         subprocess.run(
-            ["git", "-C", str(mirror_dir), "push", "--mirror", dest_url],
-            check=True,
+            ["git", "-C", str(mirror_dir), "push", "--mirror", "--prune", dest_url],
+            check=False,  # Don't fail on PR ref rejections
             capture_output=True,
             text=True
         )
+        
+        # Now push only the refs we want (branches and tags)
+        # Get all refs
+        result = subprocess.run(
+            ["git", "-C", str(mirror_dir), "show-ref"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode == 0 and result.stdout:
+            # Filter and push only branches, tags, and heads (exclude refs/pull/*)
+            refs_to_push = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        ref = parts[1]
+                        # Exclude pull request refs and other special refs
+                        if not ref.startswith('refs/pull/'):
+                            refs_to_push.append(ref)
+            
+            if refs_to_push:
+                # Push all valid refs in one command
+                push_cmd = ["git", "-C", str(mirror_dir), "push", "--force", dest_url] + refs_to_push
+                subprocess.run(
+                    push_cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
         
         print(f"Successfully mirrored {source_owner}/{source_name}")
     
