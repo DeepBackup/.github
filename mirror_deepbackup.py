@@ -12,16 +12,13 @@ class MirrorError(Exception):
     """Base exception for mirroring operations"""
     pass
 
-
 class GraphQLError(MirrorError):
     """GraphQL API errors"""
     pass
 
-
 class RepositoryError(MirrorError):
     """Repository operation errors"""
     pass
-
 
 def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]]:
     """
@@ -85,7 +82,7 @@ def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]
         query_get_repos = f"""
         query {{
           node(id: "{list_id}") {{
-            ... on StarredList {{
+            ... on List {{
               items(first: 100{after_clause}) {{
                 pageInfo {{
                   hasNextPage
