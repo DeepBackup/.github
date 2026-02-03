@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Repository mirroring script for GitHub Star List "DB" and private_repos.json
+Repository mirroring script for GitHub Star List "DB"
 Idempotent, production-grade backup system
 """
 
