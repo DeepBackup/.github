@@ -5,10 +5,52 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 
 import requests
+
+RETRYABLE_STATUS_CODES = {500, 502, 503, 504, 429}
+
+
+def make_request(
+    method: str,
+    url: str,
+    retries: int = 3,
+    backoff_factor: float = 2.0,
+    **kwargs
+) -> requests.Response:
+    """
+    Perform HTTP request with retry logic for transient errors.
+    """
+    attempt = 0
+    while True:
+        try:
+            resp = requests.request(method, url, **kwargs)
+            if resp.status_code in RETRYABLE_STATUS_CODES and attempt < retries:
+                attempt += 1
+                sleep_time = backoff_factor ** attempt
+                print(
+                    f"Warning: Request to {url} returned {resp.status_code}. "
+                    f"Retrying in {sleep_time:.1f}s (attempt {attempt}/{retries})...",
+                    file=sys.stderr
+                )
+                time.sleep(sleep_time)
+                continue
+            return resp
+        except requests.exceptions.RequestException as e:
+            if attempt < retries:
+                attempt += 1
+                sleep_time = backoff_factor ** attempt
+                print(
+                    f"Warning: Request to {url} raised {e}. "
+                    f"Retrying in {sleep_time:.1f}s (attempt {attempt}/{retries})...",
+                    file=sys.stderr
+                )
+                time.sleep(sleep_time)
+            else:
+                raise
 
 
 class MirrorError(Exception):
@@ -49,85 +91,88 @@ def _auth_url(url: str, token: str) -> str:
 def get_starlist_repositories(token: str, list_name: str) -> List[Dict[str, str]]:
     """
     Fetch repositories from a specific GitHub Star List using GraphQL API.
-    FIX: Pagination now correctly paginates on the target list only (not all lists).
+    Paginates items specifically on the target list node ID to avoid fetching items from all lists.
     """
     headers = _graphql_headers(token)
     repositories = []
-    cursor = None
 
-    # First, discover the list slug/name (lists API requires fetching all lists first)
-    query = """
+    # First, discover the list ID and name
+    query_lists = """
     query {
       viewer {
         lists(first: 100) {
-          nodes { name }
+          nodes { id name }
         }
       }
     }
     """
-    resp = requests.post(GRAPHQL_URL, json={"query": query}, headers=headers, timeout=30)
+    resp = make_request("POST", GRAPHQL_URL, json={"query": query_lists}, headers=headers, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     if "errors" in data:
         raise GraphQLError(f"GraphQL errors: {data['errors']}")
 
-    lists = data["data"]["viewer"]["lists"]["nodes"]
+    lists = data.get("data", {}).get("viewer", {}).get("lists", {}).get("nodes", [])
     available = [l["name"] for l in lists]
-    if list_name not in available:
+    target_list = next((l for l in lists if l["name"] == list_name), None)
+    if not target_list:
         raise GraphQLError(
             f"Star List '{list_name}' not found. Available lists: {available or 'None'}"
         )
 
-    # Now paginate only the target list's items
-    while True:
-        after_clause = f', after: "{cursor}"' if cursor else ""
-        query = f"""
-        query {{
-          viewer {{
-            lists(first: 100) {{
-              nodes {{
+    list_id = target_list["id"]
+    cursor = None
+
+    # Now paginate only the target list's items using node ID
+    query_items = """
+    query($id: ID!, $cursor: String) {
+      node(id: $id) {
+        ... on UserList {
+          items(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              ... on Repository {
+                owner { login }
                 name
-                items(first: 100{after_clause}) {{
-                  pageInfo {{ hasNextPage endCursor }}
-                  nodes {{
-                    ... on Repository {{
-                      owner {{ login }}
-                      name
-                      url
-                      isPrivate
-                    }}
-                  }}
-                }}
-              }}
-            }}
-          }}
-        }}
-        """
-        resp = requests.post(GRAPHQL_URL, json={"query": query}, headers=headers, timeout=30)
+                url
+                isPrivate
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    while True:
+        variables = {"id": list_id, "cursor": cursor}
+        resp = make_request("POST", GRAPHQL_URL, json={"query": query_items, "variables": variables}, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if "errors" in data:
             raise GraphQLError(f"GraphQL errors: {data['errors']}")
 
-        nodes = data["data"]["viewer"]["lists"]["nodes"]
-        target = next((l for l in nodes if l["name"] == list_name), None)
-        if not target:
+        node = data.get("data", {}).get("node")
+        if not node or "items" not in node:
             break
 
-        items = target["items"]
-        for node in items["nodes"]:
-            if node:
+        items = node["items"]
+        for item_node in items.get("nodes", []):
+            if item_node:
                 repositories.append({
-                    "owner": node["owner"]["login"],
-                    "name": node["name"],
-                    "url": node["url"],
-                    "is_private": node["isPrivate"]
+                    "owner": item_node["owner"]["login"],
+                    "name": item_node["name"],
+                    "url": item_node["url"],
+                    "is_private": item_node["isPrivate"]
                 })
 
-        page_info = items["pageInfo"]
-        if not page_info["hasNextPage"]:
+        page_info = items.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
             break
-        cursor = page_info["endCursor"]
+        cursor = page_info.get("endCursor")
 
     print(f"Found {len(repositories)} repositories in Star List '{list_name}'")
     return repositories
@@ -274,7 +319,7 @@ def ensure_destination_repo(
     dest_name = f"{source_owner}__{source_name}"
     headers = _rest_headers(token)
 
-    resp = requests.get(f"{GITHUB_API_URL}/repos/{org}/{dest_name}", headers=headers, timeout=30)
+    resp = make_request("GET", f"{GITHUB_API_URL}/repos/{org}/{dest_name}", headers=headers, timeout=30)
 
     if resp.status_code == 200:
         print(f"  Repository {org}/{dest_name} already exists")
@@ -290,7 +335,8 @@ def ensure_destination_repo(
             "has_projects": False,
             "has_wiki": False
         }
-        resp = requests.post(
+        resp = make_request(
+            "POST",
             f"{GITHUB_API_URL}/orgs/{org}/repos",
             json=payload, headers=headers, timeout=30
         )
